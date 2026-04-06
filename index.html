@@ -521,32 +521,54 @@ function initFirebase(){
 }
 
 // Listen for real-time changes from other devices
+let firstSync = true;
 function startFirebaseSync(){
   if(!firebaseRef) return;
   updateSyncStatus('connecting');
   
   firebaseRef.on('value', (snapshot) => {
     updateSyncStatus('synced');
-      const data = snapshot.val();
+    const data = snapshot.val();
+    
+    if(firstSync){
+      firstSync = false;
+      if(!data || !data.patients){
+        // Firebase is empty — push our local data up
+        console.log('Firebase vacío, subiendo datos locales...');
+        const toSave = {...DB, currentUser: null};
+        firebaseRef.set(toSave).catch(e=>console.error('Push inicial error:',e));
+      } else {
+        // Firebase has data — use it (it's the most up to date)
+        const currentUser = DB ? DB.currentUser : null;
+        DB = data;
+        DB.currentUser = currentUser;
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); } catch(e){}
+        if(currentUser && typeof updateBadges === 'function'){
+          updateBadges();
+          showPage('dashboard');
+        }
+      }
+      return;
+    }
+    
+    // Subsequent syncs: only update if not us who triggered it
     if(data && !firebaseSyncing){
-      // Merge: keep current user session, update everything else
       const currentUser = DB ? DB.currentUser : null;
       DB = data;
       DB.currentUser = currentUser;
-      // Update local cache
       try { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); } catch(e){}
-      // Refresh UI if app is running
       if(currentUser && typeof updateBadges === 'function'){
         updateBadges();
-        if(typeof currentPage !== 'undefined' && typeof showPage === 'function'){
-          if(currentPage === 'patient_detail' && currentPatientId){
-            renderPatientDetail();
-          } else {
-            showPage(currentPage, currentPatientId);
-          }
+        if(currentPage === 'patient_detail' && currentPatientId){
+          renderPatientDetail();
+        } else if(currentPage){
+          showPage(currentPage, currentPatientId);
         }
       }
     }
+  }, (error) => {
+    console.error('Firebase sync error:', error);
+    updateSyncStatus('offline');
   });
 }
 const STUDIES_LIST = [
@@ -585,7 +607,9 @@ function saveStore(){
         setTimeout(()=>{ firebaseSyncing = false; }, 1000);
       }).catch(e => {
         console.error('Firebase save error:', e);
+        updateSyncStatus('offline');
         firebaseSyncing = false;
+        // Data is safe in localStorage even if Firebase fails
       });
     }, 800); // wait 800ms after last change before saving
   }
@@ -661,12 +685,8 @@ function doLogin(){
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='block';
   initApp();
-  // Connect Firebase if not yet connected
-  if(!firebaseRef){
-    initFirebase().then(ok => { if(ok) startFirebaseSync(); });
-  } else {
-    startFirebaseSync();
-  }
+  // Start Firebase sync
+  initFirebase().then(ok => { if(ok) startFirebaseSync(); });
 }
 function showLoginError(msg){const el=document.getElementById('login-error');el.textContent=msg;el.style.display='block';}
 function showForgot(){toast('Instrucciones de recuperación enviadas a: '+DB.recoveryEmails.join(', '));}
@@ -682,6 +702,13 @@ function updateBadges(){const active=DB.patients.filter(p=>!p.alta);const pt=act
 let currentPage='dashboard', currentPatientId=null, currentDetailTab='tab-tasks';
 
 function showPage(page,patientId){
+  // Close mobile sidebar if open
+  try{
+    const sb=document.querySelector('.sidebar');
+    const ov=document.getElementById('sidebar-overlay');
+    if(sb)sb.classList.remove('open');
+    if(ov)ov.classList.remove('show');
+  }catch(e){}
   currentPage=page;
   if(patientId)currentPatientId=patientId;
   if(page!=='patient_detail')currentDetailTab='tab-tasks';
@@ -1148,14 +1175,44 @@ function openNewPatient(){
   setTimeout(()=>populateBreeds('np-species','np-breed',''),50);
 }
 function saveNewPatient(){
-  const name=document.getElementById('np-name').value.trim();
-  const tutor=document.getElementById('np-tutor').value.trim();
-  if(!name||!tutor){toast('⚠ Nombre y tutor son obligatorios');return;}
-  const dateVal=document.getElementById('np-ingreso-date').value||today();
-  const timeVal=document.getElementById('np-ingreso-time').value||new Date().toTimeString().slice(0,5);
-  const ingreso=dateVal+'T'+timeVal;
-  const p={id:'p_'+Date.now(),name,species:document.getElementById('np-species').value,breed:(()=>{const b=document.getElementById('np-breed');return b?b.value:'';})(),age:document.getElementById('np-age').value,weight:document.getElementById('np-weight').value,tutor,tutorPhone:document.getElementById('np-phone').value,ingreso,alta:null,presuntivo:document.getElementById('np-pres').value,pronostico:document.getElementById('np-pron').value,evolutions:[],tasks:makeDefaultTasks(ingreso),methods:[],reminders:makeDefaultReminders(ingreso),visits:[],notes:document.getElementById('np-notes').value};
-  DB.patients.push(p);saveStore();updateBadges();closeModal();toast('✅ Paciente '+name+' ingresado');showPage('patient_detail',p.id);
+  try{
+    const name=(document.getElementById('np-name').value||'').trim();
+    const tutor=(document.getElementById('np-tutor').value||'').trim();
+    if(!name||!tutor){toast('⚠ Nombre y tutor son obligatorios');return;}
+    const dateVal=document.getElementById('np-ingreso-date').value||today();
+    const timeVal=document.getElementById('np-ingreso-time').value||new Date().toTimeString().slice(0,5);
+    const ingreso=dateVal+'T'+timeVal;
+    const getVal=(id,def)=>{try{const e=document.getElementById(id);return e?e.value:(def||'');}catch(x){return def||'';}};
+    const p={
+      id:'p_'+Date.now(),
+      name,
+      species:getVal('np-species','Canino'),
+      breed:getVal('np-breed',''),
+      age:getVal('np-age',''),
+      weight:getVal('np-weight',''),
+      tutor,
+      tutorPhone:getVal('np-phone',''),
+      ingreso,
+      alta:null,
+      presuntivo:getVal('np-pres',''),
+      pronostico:getVal('np-pron','reservado'),
+      evolutions:[],
+      tasks:makeDefaultTasks(ingreso),
+      methods:[],
+      reminders:makeDefaultReminders(ingreso),
+      visits:[],
+      notes:getVal('np-notes','')
+    };
+    DB.patients.push(p);
+    saveStore();
+    updateBadges();
+    closeModal();
+    toast('✅ Paciente '+name+' ingresado');
+    showPage('patient_detail',p.id);
+  }catch(err){
+    console.error('Error guardando paciente:',err);
+    toast('⚠ Error al guardar: '+err.message);
+  }
 }
 
 function openEditPatient(pid){
@@ -2002,19 +2059,19 @@ function closeSidebar(){
   document.querySelector('.sidebar').classList.remove('open');
   document.getElementById('sidebar-overlay').classList.remove('show');
 }
-// Close sidebar when navigating on mobile
-const _origShowPage=showPage;
-window.showPage=function(page,pid){closeSidebar();_origShowPage(page,pid);};
+// Mobile sidebar handled inside showPage
 
 // ─── INIT ────────────────────────────────────────────────────
-window.addEventListener('load',()=>{
-  // Init Firebase first
-  const fbOk = initFirebase();
+window.addEventListener('load', async ()=>{
   populateLoginDropdown();
-  if(DB.currentUser){document.getElementById('login-screen').style.display='none';
+  // Init Firebase async - don't block UI
+  initFirebase().then(fbOk => {
+    if(fbOk) startFirebaseSync();
+  });
+  if(DB.currentUser){
+    document.getElementById('login-screen').style.display='none';
     document.getElementById('app').style.display='block';
     initApp();
-    if(fbOk) startFirebaseSync();
   }
 });
 setInterval(()=>{const s=document.getElementById('page-sub');if(s)s.textContent=new Date().toLocaleDateString('es-AR',{weekday:'long',year:'numeric',month:'long',day:'numeric'});},60000);
