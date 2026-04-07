@@ -540,7 +540,7 @@ function startFirebaseSync(){
       } else {
         // Firebase has data — use it (it's the most up to date)
         const currentUser = DB ? DB.currentUser : null;
-        DB = data;
+        DB = sanitizeDB(data);
         DB.currentUser = currentUser;
         try { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); } catch(e){}
         if(currentUser && typeof updateBadges === 'function'){
@@ -554,7 +554,7 @@ function startFirebaseSync(){
     // Subsequent syncs: only update if not us who triggered it
     if(data && !firebaseSyncing){
       const currentUser = DB ? DB.currentUser : null;
-      DB = data;
+      DB = sanitizeDB(data);
       DB.currentUser = currentUser;
       try { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); } catch(e){}
       if(currentUser && typeof updateBadges === 'function'){
@@ -586,10 +586,29 @@ const STUDIES_LIST = [
   'Presión arterial','Pulsioximetría','Temperatura','Otro (especificar)'
 ];
 // ─── STORE ────────────────────────────────────────────────────
+function sanitizeDB(data){
+  // Ensure DB always has valid structure regardless of source
+  if(!data) return initStore();
+  if(!data.users || !Array.isArray(data.users)) data.users = initStore().users;
+  if(!data.patients || !Array.isArray(data.patients)) data.patients = [];
+  if(!data.recoveryEmails || !Array.isArray(data.recoveryEmails)) data.recoveryEmails = ['melanieviltri@gmail.com'];
+  if(!data.alertsSeen || !Array.isArray(data.alertsSeen)) data.alertsSeen = [];
+  if(!data.currentUser) data.currentUser = null;
+  // Ensure each patient has valid arrays
+  data.patients.forEach(p => {
+    if(!p.tasks || !Array.isArray(p.tasks)) p.tasks = [];
+    if(!p.evolutions || !Array.isArray(p.evolutions)) p.evolutions = [];
+    if(!p.methods || !Array.isArray(p.methods)) p.methods = [];
+    if(!p.reminders || !Array.isArray(p.reminders)) p.reminders = [];
+    if(!p.visits || !Array.isArray(p.visits)) p.visits = [];
+  });
+  return data;
+}
+
 function loadStore(){
   try {
     const cached = localStorage.getItem(STORE_KEY);
-    return cached ? JSON.parse(cached) : initStore();
+    return cached ? sanitizeDB(JSON.parse(cached)) : initStore();
   } catch(e) { return initStore(); }
 }
 function saveStore(){
@@ -653,10 +672,13 @@ function initStore(){
 
 // Migrate: remove old default users that shouldn't exist, keep manually created ones
 function migrateUsers(){
-  const toRemove=['dra_romina','dr_tomas','dra_camila','dr_lucas'];
-  const before=DB.users.length;
-  DB.users=DB.users.filter(u=>!toRemove.includes(u.id));
-  if(DB.users.length!==before) saveStore();
+  try {
+    if(!DB.users || !Array.isArray(DB.users)) DB.users = initStore().users;
+    const toRemove=['dra_romina','dr_tomas','dra_camila','dr_lucas'];
+    const before=DB.users.length;
+    DB.users=DB.users.filter(u=>!toRemove.includes(u.id));
+    if(DB.users.length!==before) saveStore();
+  } catch(e){ console.error('migrateUsers error:',e); }
 }
 
 
@@ -1203,6 +1225,7 @@ function saveNewPatient(){
       visits:[],
       notes:getVal('np-notes','')
     };
+    if(!DB.patients || !Array.isArray(DB.patients)) DB.patients = [];
     DB.patients.push(p);
     saveStore();
     updateBadges();
